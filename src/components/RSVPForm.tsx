@@ -5,7 +5,7 @@ import {
   Check,
   ExternalLink,
   AlertCircle,
-  Sparkles,
+  Gift,
   X,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
@@ -586,7 +586,7 @@ export const RSVPForm: React.FC<RSVPFormProps> = ({ config }) => {
               </button>
 
               <div className="w-16 h-16 rounded-2xl bg-[#F97316]/20 border border-[#F97316]/40 text-[#F97316] flex items-center justify-center mx-auto mb-5 shadow-[0_0_30px_rgba(249,115,22,0.3)]">
-                <Sparkles className="w-8 h-8" />
+                <Gift className="w-8 h-8" />
               </div>
 
               <p className="text-xs font-semibold tracking-[0.2em] uppercase text-[#F97316] mb-2">

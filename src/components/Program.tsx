@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Sparkles, Utensils, Cake, Music, Clock } from "lucide-react";
+import { GlassWater, Utensils, Cake, Music, Clock } from "lucide-react";
 import { motion } from "motion/react";
 import { EventConfig, ScheduleItem } from "../config/eventConfig";
 
@@ -7,7 +7,7 @@ interface ProgramProps {
   config: EventConfig;
 }
 
-const STEP_ICONS = [Sparkles, Utensils, Cake, Music];
+const STEP_ICONS = [GlassWater, Utensils, Cake, Music];
 const EASE_UNFURL: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
 interface TimelineStepCardProps {

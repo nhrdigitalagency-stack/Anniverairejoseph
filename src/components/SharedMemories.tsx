@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from "react";
 import {
   Quote,
-  Sparkles,
   Plus,
   CheckCircle2,
   Clock,
@@ -461,9 +460,6 @@ export const SharedMemories: React.FC<SharedMemoriesProps> = ({
         {/* Affichage public : uniquement les messages validés, ou message par défaut si rien n'est validé */}
         {approvedMemories.length === 0 ? (
           <div className="mt-12 rounded-[28px] bg-gradient-to-br from-[#FFF1E6]/80 via-white to-[#FFF1E6]/50 border border-[#EADFD5] p-10 sm:p-14 text-center max-w-3xl mx-auto shadow-[0_10px_30px_rgba(24,24,24,0.03)]">
-            <div className="w-14 h-14 rounded-2xl bg-white border border-[#EADFD5] text-[#F97316] flex items-center justify-center mx-auto mb-5 shadow-xs">
-              <Sparkles className="w-6 h-6" />
-            </div>
             <p className="font-editorial text-2xl sm:text-3xl font-semibold text-[#181818]">
               Les premiers mots de félicitations validés s’afficheront ici très prochainement.
             </p>

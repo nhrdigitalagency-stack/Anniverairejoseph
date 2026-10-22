@@ -4,7 +4,7 @@ import {
   Clock,
   MapPin,
   Navigation,
-  Sparkles,
+  Shirt,
   Car,
   CalendarPlus,
   Check,
@@ -86,7 +86,7 @@ export const PracticalInfo: React.FC<PracticalInfoProps> = ({ config, onOpenAdmi
       label: "Dress code",
       value: config.dressCode.trim() ? config.dressCode.trim() : "Détails à venir",
       isConfirmed: Boolean(config.dressCode.trim()),
-      icon: Sparkles,
+      icon: Shirt,
     },
     {
       label: "Accès et stationnement",
