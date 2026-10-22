@@ -1,0 +1,6 @@
+{
+  "name": "L’anniversaire de Joseph | Une invitation à célébrer",
+  "description": "Invitation privée pour célébrer l’anniversaire de Joseph. Découvrez le programme, les informations pratiques et confirmez votre présence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

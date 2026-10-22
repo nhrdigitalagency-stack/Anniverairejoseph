@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+@theme {
+  --font-serif: "Cormorant Garamond", Georgia, Cambria, "Times New Roman", Times, serif;
+  --font-sans: "Poppins", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-poppins: "Poppins", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --color-orange-sig: #F97316;
+  --color-orange-dark: #C2410C;
+  --color-orange-light: #FFF1E6;
+  --color-ivory: #FFFAF5;
+  --color-anthracite: #181818;
+  --color-muted: #666666;
+  --color-border-warm: #EADFD5;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-poppins);
+    background-color: #FFFAF5;
+    color: #181818;
+    scroll-padding-top: 5.5rem;
+  }
+
+  h1, .font-poppins {
+    font-family: var(--font-poppins);
+  }
+
+  h2, .font-editorial {
+    font-family: var(--font-serif);
+  }
+}
+
+.bg-grain {
+  background-image: radial-gradient(rgba(24, 24, 24, 0.035) 1px, transparent 0);
+  background-size: 24px 24px;
+}
+
+@keyframes slowKenBurns {
+  0% {
+    transform: scale(1.08) translate3d(0, 0, 0);
+  }
+  100% {
+    transform: scale(1.0) translate3d(0, 0, 0);
+  }
+}
+
+.animate-ken-burns {
+  animation: slowKenBurns 18s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Micro-interactions premium sur les boutons d'action */
+.btn-interactive {
+  position: relative;
+  overflow: hidden;
+  transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1),
+              box-shadow 200ms cubic-bezier(0.16, 1, 0.3, 1),
+              background-color 200ms cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.btn-interactive:hover:not(:disabled) {
+  transform: translateY(-2px) scale(1.015);
+}
+
+.btn-interactive:active:not(:disabled) {
+  transform: translateY(0) scale(0.985);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
