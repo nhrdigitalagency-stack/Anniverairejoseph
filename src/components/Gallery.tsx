@@ -13,28 +13,33 @@ import {
   User,
   Check,
   AlertCircle,
+  RefreshCw,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { EventConfig, GalleryImage } from "../config/eventConfig";
 import { buildWhatsAppUrl } from "../utils/whatsapp";
+import {
+  fetchSanityGuestPhotos,
+  uploadGuestPhotoToSanity,
+  deleteGuestPhotoFromSanity,
+  SanityGuestPhoto,
+} from "../utils/sanity";
 
 interface GalleryProps {
   config: EventConfig;
 }
 
-interface GuestUploadedPhoto extends GalleryImage {
-  guestName: string;
-  file?: File;
-  isGuestUpload: true;
-}
-
-const GUEST_STORAGE_KEY = "joseph_birthday_guest_photos_v1";
+const MY_UPLOADED_IDS_KEY = "joseph_birthday_my_sanity_photo_ids_v1";
 
 /**
- * Redimensionne et compresse une image côté navigateur en Data URL JPEG
- * afin de permettre un aperçu fluide dans l’album de la soirée.
+ * Compresse une image côté navigateur en Blob JPEG optimisé avant envoi sur Sanity
+ * afin que l’import soit rapide même en 4G/5G pendant la soirée.
  */
-function compressImageFile(file: File, maxDimension = 1280, quality = 0.82): Promise<string> {
+function compressImageToBlob(
+  file: File,
+  maxDimension = 1600,
+  quality = 0.85
+): Promise<{ blob: Blob; previewUrl: string }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error("Impossible de lire le fichier image."));
@@ -57,11 +62,22 @@ function compressImageFile(file: File, maxDimension = 1280, quality = 0.82): Pro
         canvas.height = height;
         const ctx = canvas.getContext("2d");
         if (!ctx) {
-          resolve(reader.result as string);
+          resolve({ blob: file, previewUrl: reader.result as string });
           return;
         }
         ctx.drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL("image/jpeg", quality));
+        const previewUrl = canvas.toDataURL("image/jpeg", 0.8);
+        canvas.toBlob(
+          (blob) => {
+            if (blob) {
+              resolve({ blob, previewUrl });
+            } else {
+              resolve({ blob: file, previewUrl });
+            }
+          },
+          "image/jpeg",
+          quality
+        );
       };
       img.src = reader.result as string;
     };
@@ -72,18 +88,18 @@ function compressImageFile(file: File, maxDimension = 1280, quality = 0.82): Pro
 export const Gallery: React.FC<GalleryProps> = ({ config }) => {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [failedIds, setFailedIds] = useState<Record<string, boolean>>({});
-  const [guestPhotos, setGuestPhotos] = useState<GuestUploadedPhoto[]>(() => {
+  const [sanityPhotos, setSanityPhotos] = useState<SanityGuestPhoto[]>([]);
+  const [isLoadingSanity, setIsLoadingSanity] = useState<boolean>(true);
+
+  // Stocker uniquement les IDs des photos importées par cet appareil pour autoriser leur suppression par leur auteur
+  const [myUploadedIds, setMyUploadedIds] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
     try {
-      const saved = window.localStorage.getItem(GUEST_STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
-      }
+      const saved = window.localStorage.getItem(MY_UPLOADED_IDS_KEY);
+      return saved ? JSON.parse(saved) : [];
     } catch {
-      // Ignorer si localStorage est indisponible
+      return [];
     }
-    return [];
   });
 
   // États de la modale d'ajout de photos par les invités
@@ -91,6 +107,7 @@ export const Gallery: React.FC<GalleryProps> = ({ config }) => {
   const [guestName, setGuestName] = useState("");
   const [photoCaption, setPhotoCaption] = useState("");
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [compressedBlobs, setCompressedBlobs] = useState<Blob[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -99,23 +116,33 @@ export const Gallery: React.FC<GalleryProps> = ({ config }) => {
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Sauvegarder les photos ajoutées localement pour que l'invité les retrouve dans sa galerie
-  useEffect(() => {
-    if (typeof window === "undefined") return;
+  const loadPhotosFromSanity = useCallback(async (silent = false) => {
+    if (!silent) setIsLoadingSanity(true);
     try {
-      const serializable = guestPhotos.map(({ file: _f, ...rest }) => rest);
-      window.localStorage.setItem(GUEST_STORAGE_KEY, JSON.stringify(serializable));
+      const photos = await fetchSanityGuestPhotos();
+      setSanityPhotos(photos);
     } catch {
-      // Ignorer si quota dépassé
+      // Conserver l'état actuel en cas d'erreur réseau temporaire
+    } finally {
+      if (!silent) setIsLoadingSanity(false);
     }
-  }, [guestPhotos]);
+  }, []);
+
+  // Chargement initial + synchronisation périodique toutes les 20s pour voir les photos des autres invités en direct
+  useEffect(() => {
+    loadPhotosFromSanity(false);
+    const interval = window.setInterval(() => {
+      loadPhotosFromSanity(true);
+    }, 20000);
+    return () => window.clearInterval(interval);
+  }, [loadPhotosFromSanity]);
 
   const officialImages: GalleryImage[] = (config.galleryImages || []).filter(
     (img) => img && img.url && img.url.trim().length > 0 && !failedIds[img.id]
   );
 
   const allImages: (GalleryImage & { guestName?: string; isGuestUpload?: boolean })[] = [
-    ...guestPhotos.filter((img) => !failedIds[img.id]),
+    ...sanityPhotos.filter((img) => !failedIds[img.id]),
     ...officialImages,
   ];
 
@@ -171,10 +198,11 @@ export const Gallery: React.FC<GalleryProps> = ({ config }) => {
     setSelectedFiles(validImageFiles);
 
     try {
-      const compressedList = await Promise.all(
-        validImageFiles.map((file) => compressImageFile(file, 1280, 0.82))
+      const processed = await Promise.all(
+        validImageFiles.map((file) => compressImageToBlob(file, 1600, 0.85))
       );
-      setPreviews(compressedList);
+      setCompressedBlobs(processed.map((p) => p.blob));
+      setPreviews(processed.map((p) => p.previewUrl));
     } catch {
       setUploadError("Impossible de charger l’aperçu de certaines photos.");
     }
@@ -186,7 +214,7 @@ export const Gallery: React.FC<GalleryProps> = ({ config }) => {
       setUploadError("Veuillez indiquer votre prénom pour signer vos photos.");
       return;
     }
-    if (previews.length === 0) {
+    if (compressedBlobs.length === 0) {
       setUploadError("Veuillez sélectionner au moins une photo prise lors de l’anniversaire.");
       return;
     }
@@ -194,24 +222,41 @@ export const Gallery: React.FC<GalleryProps> = ({ config }) => {
     setIsProcessing(true);
     setUploadError(null);
 
-    const cleanName = guestName.trim();
-    const cleanCaption =
-      photoCaption.trim() || `Souvenir partagé par ${cleanName}`;
+    try {
+      const cleanName = guestName.trim();
+      const cleanCaption =
+        photoCaption.trim() || `Souvenir partagé par ${cleanName}`;
 
-    const newEntries: GuestUploadedPhoto[] = previews.map((dataUrl, idx) => ({
-      id: `guest-photo-${Date.now()}-${idx}`,
-      url: dataUrl,
-      alt: `${cleanCaption} (par ${cleanName})`,
-      caption: cleanCaption,
-      guestName: cleanName,
-      file: selectedFiles[idx],
-      isGuestUpload: true,
-      aspectRatio: "portrait",
-    }));
+      const uploadedItems = await Promise.all(
+        compressedBlobs.map((blob, idx) =>
+          uploadGuestPhotoToSanity({
+            file: blob,
+            filename: selectedFiles[idx]?.name || `photo-${Date.now()}-${idx}.jpg`,
+            guestName: cleanName,
+            caption: cleanCaption,
+          })
+        )
+      );
 
-    setGuestPhotos((prev) => [...newEntries, ...prev]);
-    setIsProcessing(false);
-    setUploadSuccess(true);
+      setSanityPhotos((prev) => [...uploadedItems, ...prev]);
+
+      const newIds = uploadedItems.map((item) => item.id);
+      const updatedMyIds = [...newIds, ...myUploadedIds];
+      setMyUploadedIds(updatedMyIds);
+      try {
+        window.localStorage.setItem(MY_UPLOADED_IDS_KEY, JSON.stringify(updatedMyIds));
+      } catch {
+        // Ignorer
+      }
+
+      setIsProcessing(false);
+      setUploadSuccess(true);
+    } catch {
+      setIsProcessing(false);
+      setUploadError(
+        "Une erreur est survenue lors de l’envoi sur le serveur Sanity. Veuillez réessayer."
+      );
+    }
   };
 
   const handleSendPhotosViaWhatsApp = async () => {
@@ -219,8 +264,6 @@ export const Gallery: React.FC<GalleryProps> = ({ config }) => {
     const count = selectedFiles.length || 1;
     const captionNote = photoCaption.trim() ? `\nLégende : ${photoCaption.trim()}` : "";
 
-    // Si le navigateur mobile supporte le partage natif de fichiers (Web Share API Level 2),
-    // permettre d'envoyer directement les fichiers photos vers WhatsApp
     if (
       selectedFiles.length > 0 &&
       typeof navigator !== "undefined" &&
@@ -235,16 +278,14 @@ export const Gallery: React.FC<GalleryProps> = ({ config }) => {
         });
         return;
       } catch {
-        // Continuer vers le lien WhatsApp classique si l'utilisateur annule ou préfère wa.me
+        // Repli vers le lien WhatsApp classique
       }
     }
 
     const whatsappMessage = [
-      `Bonjour, voici ${count > 1 ? `${count} photos prises` : "une photo prise"} lors de l’anniversaire de ${config.celebrantName} !`,
+      `Bonjour, j’ai publié ${count > 1 ? `${count} photos` : "une photo"} dans la galerie du site pour l’anniversaire de ${config.celebrantName} !`,
       "",
       `De la part de : ${cleanName}${captionNote}`,
-      "",
-      "(Je joins les photos directement dans cette conversation WhatsApp 📸)",
     ].join("\n");
 
     const url = buildWhatsAppUrl(whatsappMessage, config.whatsappNumber);
@@ -261,14 +302,20 @@ export const Gallery: React.FC<GalleryProps> = ({ config }) => {
     setUploadModalOpen(false);
     setUploadSuccess(false);
     setSelectedFiles([]);
+    setCompressedBlobs([]);
     setPreviews([]);
     setPhotoCaption("");
     setUploadError(null);
   };
 
-  const handleDeleteGuestPhoto = (id: string, e: React.MouseEvent) => {
+  const handleDeleteGuestPhoto = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setGuestPhotos((prev) => prev.filter((item) => item.id !== id));
+    setSanityPhotos((prev) => prev.filter((item) => item.id !== id));
+    try {
+      await deleteGuestPhotoFromSanity(id);
+    } catch {
+      // Ignorer si déjà supprimé
+    }
   };
 
   return (
@@ -283,19 +330,31 @@ export const Gallery: React.FC<GalleryProps> = ({ config }) => {
               Galerie & Souvenirs de la fête
             </h2>
             <p className="mt-3 text-sm sm:text-base text-[#666666] leading-relaxed">
-              Découvrez les portraits de {config.celebrantName} et ajoutez vos propres photos
-              prises le jour de l’anniversaire pour enrichir l’album de la soirée.
+              Découvrez les portraits de {config.celebrantName} et publiez vos propres photos
+              prises le jour de l’anniversaire : elles seront visibles par tous les invités.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-3 shrink-0">
             <button
               type="button"
+              onClick={() => loadPhotosFromSanity(false)}
+              title="Actualiser la galerie partagée"
+              className="btn-interactive inline-flex items-center justify-center gap-2 px-4 py-3.5 rounded-2xl bg-white hover:bg-[#FFF1E6] border border-[#EADFD5] text-xs sm:text-sm font-semibold text-[#181818] cursor-pointer"
+            >
+              <RefreshCw
+                className={`w-4 h-4 text-[#F97316] ${isLoadingSanity ? "animate-spin" : ""}`}
+              />
+              <span>Actualiser</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => {
                 setUploadSuccess(false);
                 setUploadModalOpen(true);
               }}
-              className="inline-flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-2xl bg-[#F97316] hover:bg-[#C2410C] text-white text-sm font-semibold transition-all shadow-[0_8px_24px_rgba(249,115,22,0.25)] hover:-translate-y-0.5 cursor-pointer whitespace-nowrap"
+              className="btn-interactive inline-flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-2xl bg-[#F97316] hover:bg-[#C2410C] text-white text-sm font-semibold shadow-[0_8px_24px_rgba(249,115,22,0.25)] cursor-pointer whitespace-nowrap"
             >
               <Camera className="w-4 h-4" />
               <span>Ajouter mes photos de la soirée</span>
@@ -311,11 +370,10 @@ export const Gallery: React.FC<GalleryProps> = ({ config }) => {
             </div>
             <div>
               <h3 className="font-editorial text-xl sm:text-2xl font-semibold text-[#181818]">
-                Vous avez pris de belles photos pendant la fête ?
+                Album partagé en direct entre tous les invités
               </h3>
               <p className="text-xs sm:text-sm text-[#666666]">
-                Ajoutez-les directement dans cet album souvenir et transmettez-les à{" "}
-                {config.celebrantName} en un clic.
+                Chaque photo importée ici est enregistrée et visible par tout le monde sur le site.
               </p>
             </div>
           </div>
@@ -326,10 +384,10 @@ export const Gallery: React.FC<GalleryProps> = ({ config }) => {
               setUploadSuccess(false);
               setUploadModalOpen(true);
             }}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white hover:bg-[#FFFAF5] border border-[#EADFD5] hover:border-[#F97316] text-xs sm:text-sm font-semibold text-[#C2410C] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            className="btn-interactive inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white hover:bg-[#FFFAF5] border border-[#EADFD5] hover:border-[#F97316] text-xs sm:text-sm font-semibold text-[#C2410C] cursor-pointer whitespace-nowrap shrink-0"
           >
             <Plus className="w-4 h-4" />
-            <span>Sélectionner des photos</span>
+            <span>Publier des photos</span>
           </button>
         </div>
 
@@ -342,82 +400,86 @@ export const Gallery: React.FC<GalleryProps> = ({ config }) => {
               Les beaux souvenirs trouveront bientôt leur place ici.
             </p>
             <p className="mt-2 text-sm text-[#666666] max-w-md mx-auto">
-              Soyez le premier invité à ajouter une photo prise lors de l’anniversaire de{" "}
+              Soyez le premier invité à publier une photo prise lors de l’anniversaire de{" "}
               {config.celebrantName}.
             </p>
           </div>
         ) : (
           /* Grille éditoriale responsive */
           <div className="mt-10 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-            {allImages.map((image, idx) => (
-              <figure
-                key={image.id}
-                className="group relative rounded-[24px] overflow-hidden bg-[#FFF1E6] border border-[#EADFD5] shadow-[0_10px_30px_rgba(24,24,24,0.05)] aspect-[3/4]"
-              >
-                <button
-                  type="button"
-                  onClick={() => setSelectedIndex(idx)}
-                  aria-label={`Agrandir la photo : ${image.alt}`}
-                  className="w-full h-full block text-left cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#F97316]"
+            {allImages.map((image, idx) => {
+              const canDelete =
+                Boolean(image.isGuestUpload) && myUploadedIds.includes(image.id);
+
+              return (
+                <figure
+                  key={image.id}
+                  className="group relative rounded-[24px] overflow-hidden bg-[#FFF1E6] border border-[#EADFD5] shadow-[0_10px_30px_rgba(24,24,24,0.05)] aspect-[3/4]"
                 >
-                  <img
-                    src={image.url}
-                    alt={image.alt}
-                    loading={idx < 2 ? "eager" : "lazy"}
-                    referrerPolicy="no-referrer"
-                    onError={() =>
-                      setFailedIds((prev) => ({
-                        ...prev,
-                        [image.id]: true,
-                      }))
-                    }
-                    className="w-full h-full object-cover object-top transition-transform duration-500 group-hover:scale-105"
-                  />
-
-                  {/* Scrim discret au survol */}
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/15 to-transparent opacity-85 group-hover:opacity-95 transition-opacity flex flex-col justify-end p-5">
-                    <div className="flex items-end justify-between gap-3">
-                      <div>
-                        <span className="text-[11px] font-medium text-[#F97316] tracking-wider">
-                          {image.isGuestUpload && image.guestName
-                            ? `Photo de ${image.guestName}`
-                            : `0${idx + 1}`}
-                        </span>
-                        {image.caption && (
-                          <figcaption className="font-editorial text-xl font-semibold text-[#FFFAF5] leading-snug line-clamp-2">
-                            {image.caption}
-                          </figcaption>
-                        )}
-                      </div>
-                      <span
-                        aria-hidden="true"
-                        className="w-9 h-9 rounded-xl bg-white/15 backdrop-blur-xs text-white flex items-center justify-center shrink-0 group-hover:bg-[#F97316] transition-colors"
-                      >
-                        <Maximize2 className="w-4 h-4" />
-                      </span>
-                    </div>
-                  </div>
-                </button>
-
-                {/* Bouton de retrait si c'est une photo ajoutée par l'invité sur son appareil */}
-                {image.isGuestUpload && (
                   <button
                     type="button"
-                    onClick={(e) => handleDeleteGuestPhoto(image.id, e)}
-                    aria-label="Retirer cette photo de mon aperçu"
-                    title="Retirer cette photo"
-                    className="absolute top-3 right-3 z-10 w-8 h-8 rounded-full bg-black/55 hover:bg-red-600 text-white flex items-center justify-center transition-colors cursor-pointer"
+                    onClick={() => setSelectedIndex(idx)}
+                    aria-label={`Agrandir la photo : ${image.alt}`}
+                    className="w-full h-full block text-left cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#F97316]"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    <img
+                      src={image.url}
+                      alt={image.alt}
+                      loading={idx < 2 ? "eager" : "lazy"}
+                      referrerPolicy="no-referrer"
+                      onError={() =>
+                        setFailedIds((prev) => ({
+                          ...prev,
+                          [image.id]: true,
+                        }))
+                      }
+                      className="w-full h-full object-cover object-top transition-transform duration-500 group-hover:scale-105"
+                    />
+
+                    {/* Scrim discret au survol */}
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/15 to-transparent opacity-85 group-hover:opacity-95 transition-opacity flex flex-col justify-end p-5">
+                      <div className="flex items-end justify-between gap-3">
+                        <div>
+                          <span className="text-[11px] font-medium text-[#F97316] tracking-wider">
+                            {image.isGuestUpload && image.guestName
+                              ? `Par ${image.guestName}`
+                              : `0${idx + 1}`}
+                          </span>
+                          {image.caption && (
+                            <figcaption className="font-editorial text-xl font-semibold text-[#FFFAF5] leading-snug line-clamp-2">
+                              {image.caption}
+                            </figcaption>
+                          )}
+                        </div>
+                        <span
+                          aria-hidden="true"
+                          className="w-9 h-9 rounded-xl bg-white/15 backdrop-blur-xs text-white flex items-center justify-center shrink-0 group-hover:bg-[#F97316] transition-colors"
+                        >
+                          <Maximize2 className="w-4 h-4" />
+                        </span>
+                      </div>
+                    </div>
                   </button>
-                )}
-              </figure>
-            ))}
+
+                  {canDelete && (
+                    <button
+                      type="button"
+                      onClick={(e) => handleDeleteGuestPhoto(image.id, e)}
+                      aria-label="Supprimer ma photo publiée"
+                      title="Supprimer ma photo"
+                      className="absolute top-3 right-3 z-10 w-8 h-8 rounded-full bg-black/55 hover:bg-red-600 text-white flex items-center justify-center transition-colors cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </figure>
+              );
+            })}
           </div>
         )}
       </div>
 
-      {/* Modale d’ajout de photos par les invités le jour de l'anniversaire */}
+      {/* Modale d’ajout de photos par les invités (publiées sur Sanity pour tout le monde) */}
       <AnimatePresence>
         {uploadModalOpen && (
           <motion.div
@@ -448,11 +510,10 @@ export const Gallery: React.FC<GalleryProps> = ({ config }) => {
                       id="guest-upload-modal-title"
                       className="font-editorial text-2xl sm:text-3xl font-semibold text-[#181818]"
                     >
-                      Partager mes photos de la fête
+                      Publier mes photos de la fête
                     </h3>
                     <p className="text-xs text-[#666666]">
-                      Immortalisez les meilleurs moments de l’anniversaire de{" "}
-                      {config.celebrantName}.
+                      Vos photos seront visibles par tous les invités dans la galerie.
                     </p>
                   </div>
                 </div>
@@ -569,17 +630,19 @@ export const Gallery: React.FC<GalleryProps> = ({ config }) => {
                     <button
                       type="submit"
                       disabled={isProcessing}
-                      className="flex-1 inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-[#F97316] hover:bg-[#C2410C] text-white text-sm font-semibold transition-colors cursor-pointer shadow-sm"
+                      className="btn-interactive flex-1 inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-[#F97316] hover:bg-[#C2410C] text-white text-sm font-semibold cursor-pointer shadow-sm disabled:opacity-60"
                     >
                       <Plus className="w-4 h-4" />
                       <span>
-                        {isProcessing ? "Ajout en cours..." : "Ajouter à la galerie"}
+                        {isProcessing
+                          ? "Publication sur la galerie en cours..."
+                          : "Publier dans la galerie pour tout le monde"}
                       </span>
                     </button>
                   </div>
                 </form>
               ) : (
-                /* État après ajout dans la galerie + transmission directe à Joseph sur WhatsApp */
+                /* État après publication sur Sanity */
                 <div className="space-y-5 text-center py-2">
                   <div className="w-14 h-14 rounded-2xl bg-[#FFF1E6] text-[#C2410C] flex items-center justify-center mx-auto">
                     <Check className="w-7 h-7" />
@@ -587,32 +650,31 @@ export const Gallery: React.FC<GalleryProps> = ({ config }) => {
 
                   <div>
                     <h4 className="font-editorial text-2xl font-semibold text-[#181818]">
-                      Merci {guestName} ! Vos photos ont été ajoutées à la galerie.
+                      Merci {guestName} ! Vos photos sont maintenant en ligne.
                     </h4>
                     <p className="mt-2 text-xs sm:text-sm text-[#666666] leading-relaxed">
-                      Vos clichés apparaissent désormais dans l’album sur votre écran. Pour que{" "}
-                      <strong className="text-[#181818]">{config.celebrantName}</strong> les
-                      reçoive aussi en haute définition, envoyez-les maintenant sur WhatsApp :
+                      Elles sont enregistrées sur Sanity et visibles par tous les invités qui
+                      consultent le site de <strong className="text-[#181818]">{config.celebrantName}</strong>.
                     </p>
                   </div>
 
                   <div className="flex flex-col gap-3 pt-2">
                     <button
                       type="button"
-                      onClick={handleSendPhotosViaWhatsApp}
-                      className="w-full inline-flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-xl bg-[#F97316] hover:bg-[#C2410C] text-white text-sm font-semibold transition-colors cursor-pointer shadow-md"
+                      onClick={resetUploadModal}
+                      className="btn-interactive w-full inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-[#F97316] hover:bg-[#C2410C] text-white text-sm font-semibold cursor-pointer shadow-md"
                     >
-                      <Share2 className="w-4 h-4" />
-                      <span>Envoyer aussi mes photos sur WhatsApp</span>
+                      <Check className="w-4 h-4" />
+                      <span>Voir mes photos dans la galerie</span>
                     </button>
 
                     <button
                       type="button"
-                      onClick={resetUploadModal}
-                      className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-white hover:bg-[#FFF1E6] border border-[#EADFD5] text-xs sm:text-sm font-semibold text-[#181818] transition-colors cursor-pointer"
+                      onClick={handleSendPhotosViaWhatsApp}
+                      className="btn-interactive w-full inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-white hover:bg-[#FFF1E6] border border-[#EADFD5] text-xs sm:text-sm font-semibold text-[#181818] cursor-pointer"
                     >
-                      <MessageCircle className="w-4 h-4 text-[#F97316]" />
-                      <span>Voir mes photos dans la galerie</span>
+                      <Share2 className="w-4 h-4 text-[#F97316]" />
+                      <span>Prévenir aussi sur WhatsApp</span>
                     </button>
                   </div>
                 </div>

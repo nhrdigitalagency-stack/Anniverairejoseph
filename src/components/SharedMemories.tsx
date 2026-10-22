@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   Quote,
   Plus,
@@ -13,61 +13,54 @@ import {
 import { motion, AnimatePresence } from "motion/react";
 import { EventConfig, SharedMemoryItem } from "../config/eventConfig";
 import { buildWhatsAppUrl } from "../utils/whatsapp";
+import {
+  fetchSanitySharedMemories,
+  createSanitySharedMemory,
+  toggleSanitySharedMemoryApproval,
+  deleteSanitySharedMemory,
+} from "../utils/sanity";
 
 interface SharedMemoriesProps {
   config: EventConfig;
   onUpdateConfig?: (nextConfig: EventConfig) => void;
 }
 
-const LOCAL_MEMORIES_KEY = "joseph_birthday_shared_memories_v1";
-
-export const SharedMemories: React.FC<SharedMemoriesProps> = ({
-  config,
-  onUpdateConfig,
-}) => {
-  const [localMemories, setLocalMemories] = useState<SharedMemoryItem[]>(() => {
-    if (typeof window === "undefined") return [];
-    try {
-      const saved = window.localStorage.getItem(LOCAL_MEMORIES_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch {
-      // Ignorer si localStorage est indisponible
-    }
-    return [];
-  });
-
+export const SharedMemories: React.FC<SharedMemoriesProps> = ({ config }) => {
+  const [sanityMemories, setSanityMemories] = useState<SharedMemoryItem[]>([]);
   const [formOpen, setFormOpen] = useState(false);
   const [moderationOpen, setModerationOpen] = useState(false);
   const [author, setAuthor] = useState("");
   const [relation, setRelation] = useState("");
   const [message, setMessage] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submittedNotice, setSubmittedNotice] = useState(false);
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
+  const loadMemories = useCallback(async () => {
     try {
-      window.localStorage.setItem(LOCAL_MEMORIES_KEY, JSON.stringify(localMemories));
+      const items = await fetchSanitySharedMemories();
+      setSanityMemories(items);
     } catch {
-      // Ignorer
+      // Conserver les souvenirs déjà chargés en cas d'erreur réseau
     }
-  }, [localMemories]);
+  }, []);
 
-  // Fusionner les messages configurés et les messages soumis localement
+  useEffect(() => {
+    loadMemories();
+    const interval = window.setInterval(loadMemories, 25000);
+    return () => window.clearInterval(interval);
+  }, [loadMemories]);
+
   const configMemories = Array.isArray(config.sharedMemories) ? config.sharedMemories : [];
   const allMemories: SharedMemoryItem[] = [
-    ...localMemories,
-    ...configMemories.filter((cm) => !localMemories.some((lm) => lm.id === cm.id)),
+    ...sanityMemories,
+    ...configMemories.filter((cm) => !sanityMemories.some((sm) => sm.id === cm.id)),
   ];
 
-  // Seuls les messages ayant `approved: true` sont affichés publiquement
   const approvedMemories = allMemories.filter((item) => item.approved);
   const pendingMemories = allMemories.filter((item) => !item.approved);
 
-  const handleSubmitMemory = (e: React.FormEvent) => {
+  const handleSubmitMemory = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!author.trim()) {
       setError("Veuillez indiquer votre prénom.");
@@ -83,49 +76,50 @@ export const SharedMemories: React.FC<SharedMemoriesProps> = ({
     }
 
     setError(null);
+    setIsSubmitting(true);
 
-    const newItem: SharedMemoryItem = {
-      id: `memory-${Date.now()}`,
-      author: author.trim(),
-      relation: relation.trim() || undefined,
-      message: message.trim(),
-      date: new Intl.DateTimeFormat("fr-FR", {
-        day: "numeric",
-        month: "short",
-      }).format(new Date()),
-      approved: false, // En attente de validation par défaut (modération simplifiée)
-    };
-
-    setLocalMemories((prev) => [newItem, ...prev]);
-    setSubmittedNotice(true);
-    setAuthor("");
-    setRelation("");
-    setMessage("");
-  };
-
-  const handleToggleApprove = (id: string) => {
-    const existsInLocal = localMemories.some((m) => m.id === id);
-    if (existsInLocal) {
-      setLocalMemories((prev) =>
-        prev.map((m) => (m.id === id ? { ...m, approved: !m.approved } : m))
-      );
-    } else if (onUpdateConfig) {
-      onUpdateConfig({
-        ...config,
-        sharedMemories: configMemories.map((m) =>
-          m.id === id ? { ...m, approved: !m.approved } : m
-        ),
+    try {
+      const created = await createSanitySharedMemory({
+        author: author.trim(),
+        relation: relation.trim() || undefined,
+        message: message.trim(),
+        date: new Intl.DateTimeFormat("fr-FR", {
+          day: "numeric",
+          month: "short",
+        }).format(new Date()),
+        approved: false,
       });
+
+      setSanityMemories((prev) => [created, ...prev]);
+      setSubmittedNotice(true);
+      setAuthor("");
+      setRelation("");
+      setMessage("");
+    } catch {
+      setError("Impossible d’enregistrer votre message pour le moment. Veuillez réessayer.");
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
-  const handleDeleteMemory = (id: string) => {
-    setLocalMemories((prev) => prev.filter((m) => m.id !== id));
-    if (onUpdateConfig) {
-      onUpdateConfig({
-        ...config,
-        sharedMemories: configMemories.filter((m) => m.id !== id),
-      });
+  const handleToggleApprove = async (item: SharedMemoryItem) => {
+    const nextApproved = !item.approved;
+    setSanityMemories((prev) =>
+      prev.map((m) => (m.id === item.id ? { ...m, approved: nextApproved } : m))
+    );
+    try {
+      await toggleSanitySharedMemoryApproval(item.id, nextApproved);
+    } catch {
+      loadMemories();
+    }
+  };
+
+  const handleDeleteMemory = async (id: string) => {
+    setSanityMemories((prev) => prev.filter((m) => m.id !== id));
+    try {
+      await deleteSanitySharedMemory(id);
+    } catch {
+      loadMemories();
     }
   };
 
@@ -184,7 +178,7 @@ export const SharedMemories: React.FC<SharedMemoriesProps> = ({
                 setSubmittedNotice(false);
                 setFormOpen((prev) => !prev);
               }}
-              className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-[#F97316] hover:bg-[#C2410C] text-white text-sm font-semibold transition-colors shadow-sm cursor-pointer whitespace-nowrap"
+              className="btn-interactive inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-[#F97316] hover:bg-[#C2410C] text-white text-sm font-semibold shadow-sm cursor-pointer whitespace-nowrap"
             >
               <Plus className="w-4 h-4" />
               <span>Proposer un mot court</span>
@@ -194,7 +188,7 @@ export const SharedMemories: React.FC<SharedMemoriesProps> = ({
               type="button"
               onClick={() => setModerationOpen((prev) => !prev)}
               aria-expanded={moderationOpen}
-              className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-white hover:bg-[#FFF1E6] border border-[#EADFD5] text-xs sm:text-sm font-semibold text-[#181818] transition-colors cursor-pointer whitespace-nowrap"
+              className="btn-interactive inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-white hover:bg-[#FFF1E6] border border-[#EADFD5] text-xs sm:text-sm font-semibold text-[#181818] cursor-pointer whitespace-nowrap"
             >
               <ShieldCheck className="w-4 h-4 text-[#C2410C]" />
               <span>
@@ -308,10 +302,13 @@ export const SharedMemories: React.FC<SharedMemoriesProps> = ({
                     </p>
                     <button
                       type="submit"
-                      className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#181818] hover:bg-[#C2410C] text-white text-xs sm:text-sm font-semibold transition-colors cursor-pointer"
+                      disabled={isSubmitting}
+                      className="btn-interactive inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#181818] hover:bg-[#C2410C] text-white text-xs sm:text-sm font-semibold cursor-pointer disabled:opacity-60"
                     >
                       <Send className="w-3.5 h-3.5 text-[#F97316]" />
-                      <span>Soumettre à validation</span>
+                      <span>
+                        {isSubmitting ? "Enregistrement..." : "Soumettre à validation"}
+                      </span>
                     </button>
                   </div>
                 </form>
@@ -321,11 +318,11 @@ export const SharedMemories: React.FC<SharedMemoriesProps> = ({
                     <Clock className="w-5 h-5 text-[#F97316] shrink-0 mt-0.5" />
                     <div>
                       <p className="font-semibold">
-                        Votre message a été placé en attente de modération.
+                        Votre message a été enregistré et placé en attente de modération.
                       </p>
                       <p className="mt-1 text-xs text-[#666666]">
-                        Vous pouvez l’approuver en un clic via le bouton « Modération » ou le
-                        transmettre sur WhatsApp à l’organisation.
+                        Une fois validé via le bouton « Modération », il sera visible par tous les
+                        invités sur le site.
                       </p>
                     </div>
                   </div>
@@ -354,7 +351,7 @@ export const SharedMemories: React.FC<SharedMemoriesProps> = ({
           )}
         </AnimatePresence>
 
-        {/* Panneau de modération simplifiée */}
+        {/* Panneau de modération simplifiée synchronisé avec Sanity */}
         <AnimatePresence>
           {moderationOpen && (
             <motion.div
@@ -372,8 +369,8 @@ export const SharedMemories: React.FC<SharedMemoriesProps> = ({
                       Modération simplifiée des souvenirs
                     </h3>
                     <p className="text-xs text-white/70">
-                      Validez ou masquez en un clic les messages courts pour les afficher dans la
-                      section publique.
+                      Validez ou masquez en un clic les messages courts pour les afficher à tous
+                      les visiteurs.
                     </p>
                   </div>
                 </div>
@@ -411,7 +408,7 @@ export const SharedMemories: React.FC<SharedMemoriesProps> = ({
                               item.approved ? "text-emerald-400" : "text-[#F97316]"
                             }`}
                           >
-                            {item.approved ? "Validé (affiché)" : "En attente"}
+                            {item.approved ? "Validé (affiché à tous)" : "En attente"}
                           </span>
                         </div>
                         <p className="text-sm text-white/90 italic">« {item.message} »</p>
@@ -420,7 +417,7 @@ export const SharedMemories: React.FC<SharedMemoriesProps> = ({
                       <div className="flex flex-wrap items-center gap-2 shrink-0">
                         <button
                           type="button"
-                          onClick={() => handleToggleApprove(item.id)}
+                          onClick={() => handleToggleApprove(item)}
                           className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
                             item.approved
                               ? "bg-white/10 hover:bg-white/20 text-white"
@@ -428,7 +425,9 @@ export const SharedMemories: React.FC<SharedMemoriesProps> = ({
                           }`}
                         >
                           <CheckCircle2 className="w-3.5 h-3.5" />
-                          <span>{item.approved ? "Retirer de l’affichage" : "Valider & Afficher"}</span>
+                          <span>
+                            {item.approved ? "Retirer de l’affichage" : "Valider & Afficher"}
+                          </span>
                         </button>
 
                         <button
